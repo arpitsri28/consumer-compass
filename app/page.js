@@ -3,11 +3,17 @@ import React from "react"
 import Navbar from "./components/Navbar"
 import Box from "@mui/material/Box"; 
 import Typography from "@mui/material/Typography";
+import Alert from "@mui/material/Alert";
+import { useAuth } from "./context/authContext";
 
 export default function Home() {
+    const { firebaseConfigured } = useAuth();
     return (
         <>
         <Navbar page={"Home"}/>
+        {!firebaseConfigured && <Alert severity="info" sx={{ m: 2 }}>
+            Deployment demo: sign-in and AI chat are not configured yet.
+        </Alert>}
         <Box
             sx={{
                 marginTop: '40px', 

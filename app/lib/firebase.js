@@ -10,7 +10,10 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 
-const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
-const auth = getAuth(app);
+// A deployment without Firebase can serve public pages, but cannot authenticate users.
+const firebaseConfigured = [firebaseConfig.apiKey, firebaseConfig.authDomain,
+  firebaseConfig.projectId, firebaseConfig.appId].every((value) => Boolean(value?.trim()));
+const app = firebaseConfigured ? (getApps().length ? getApp() : initializeApp(firebaseConfig)) : null;
+const auth = app ? getAuth(app) : null;
 
-export { auth, app };
+export { auth, app, firebaseConfigured };

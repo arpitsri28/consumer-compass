@@ -1,0 +1,75 @@
+name: consumer-compass-demo
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "5m"
+    max-file: "2"
+
+services:
+  app:
+    image: consumer-compass:demo
+    build: .
+    restart: unless-stopped
+    init: true
+    mem_limit: 384m
+    memswap_limit: 768m
+    environment:
+      NODE_OPTIONS: --max-old-space-size=192
+      DATABASE_URL: postgresql://consumer_compass:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.demo}@postgres:5432/consumer_compass
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    logging: *logging
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    mem_limit: 160m
+    memswap_limit: 320m
+    environment:
+      POSTGRES_DB: consumer_compass
+      POSTGRES_USER: consumer_compass
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.demo}
+    command: [postgres, -c, shared_buffers=32MB, -c, max_connections=20, -c, work_mem=2MB]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U consumer_compass -d consumer_compass"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    mem_limit: 64m
+    memswap_limit: 128m
+    command: [redis-server, --maxmemory, 24mb, --maxmemory-policy, noeviction, --save, "", --appendonly, "no"]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logging
+
+  nginx:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    mem_limit: 32m
+    memswap_limit: 64m
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/nginx-demo.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    logging: *logging
+
+volumes:
+  postgres_data:
