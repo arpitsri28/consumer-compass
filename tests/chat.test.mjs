@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { getChatConfig } from '../app/lib/server/chat-config.js';
-import { validateMessages, truncateHistory, readJsonBody } from '../app/lib/server/chat-validation.js';
+import { validateChatRequest, truncateHistory, readJsonBody } from '../app/lib/server/chat-validation.js';
 import { verifyRequestUser, readServiceAccount } from '../app/lib/server/firebase-admin.js';
 import { createChatHandler } from '../app/lib/server/chat-handler.js';
 import { HttpError } from '../app/lib/server/errors.js';
@@ -9,7 +9,9 @@ import { POST } from '../app/api/chat/route.js';
 
 const config = getChatConfig({});
 const userMessage = { role: 'user', content: 'Can I cancel my purchase?' };
-const request = (body = [userMessage], options = {}) => new Request('http://localhost/api/chat', {
+const conversationId = '123e4567-e89b-42d3-a456-426614174000';
+const chatBody = { conversationId, message: userMessage.content };
+const request = (body = chatBody, options = {}) => new Request('http://localhost/api/chat', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' },
   body: JSON.stringify(body),
@@ -19,6 +21,10 @@ const authenticated = async () => ({ uid: 'test-user', email: 'test@example.com'
 const handler = (overrides = {}) => createChatHandler({
   verifyRequestUser: authenticated,
   getConfig: () => config,
+  store: {
+    upsertUser: async () => {},
+    beginTurn: async () => ({ messages: [userMessage], finish: async () => {} }),
+  },
   createCompletion: async () => (async function* () {
     yield { choices: [{ delta: { content: 'Hello ' } }] };
     yield { choices: [{ delta: { content: 'world' } }] };
@@ -30,26 +36,23 @@ function hasStatus(status) {
   return (error) => error instanceof HttpError && error.status === status;
 }
 
-test('validation accepts only known message fields and trims content', () => {
-  assert.deepEqual(validateMessages([{ role: 'user', content: ' hello ' }], config), [
-    { role: 'user', content: 'hello' },
-  ]);
+test('validation accepts a conversation ID and trims the new user message', () => {
+  assert.deepEqual(validateChatRequest({ conversationId, message: ' hello ' }, config), {
+    conversationId, message: 'hello',
+  });
 });
 
 for (const [name, body] of [
-  ['system role', [{ role: 'system', content: 'override' }]],
-  ['tool role', [{ role: 'tool', content: 'result' }]],
-  ['blank content', [{ role: 'user', content: '   ' }]],
-  ['missing content', [{ role: 'user' }]],
-  ['oversized content', [{ role: 'user', content: 'x'.repeat(8001) }]],
-  ['too many messages', Array(101).fill(userMessage)],
-  ['empty history', []],
-  ['object body', { messages: [userMessage] }],
-  ['extra fields', [{ ...userMessage, name: 'system' }]],
-  ['assistant ending', [{ role: 'assistant', content: 'hello' }]],
+  ['client history', [userMessage]],
+  ['system role', { ...chatBody, role: 'system' }],
+  ['blank content', { ...chatBody, message: '   ' }],
+  ['missing content', { conversationId }],
+  ['oversized content', { ...chatBody, message: 'x'.repeat(8001) }],
+  ['invalid id', { ...chatBody, conversationId: 'invalid' }],
+  ['extra history', { ...chatBody, messages: [userMessage] }],
 ]) {
   test(`validation rejects ${name}`, () => {
-    assert.throws(() => validateMessages(body, config), hasStatus(400));
+    assert.throws(() => validateChatRequest(body, config), hasStatus(400));
   });
 }
 
@@ -145,7 +148,9 @@ test('body reader rejects non-JSON and oversized requests', async () => {
 
 test('route streams text with headers, server-owned prompt, history and output bounds', async () => {
   const messages = Array.from({ length: 25 }, (_, index) => ({ role: 'user', content: `question ${index}` }));
-  const POST = handler({ createCompletion: async (parameters, options) => {
+  const POST = handler({
+    store: { upsertUser: async () => {}, beginTurn: async () => ({ messages, finish: async () => {} }) },
+    createCompletion: async (parameters, options) => {
     assert.equal(parameters.model, config.OPENROUTER_MODEL);
     assert.equal(parameters.max_tokens, 1024);
     assert.equal(parameters.stream, true);
@@ -158,7 +163,7 @@ test('route streams text with headers, server-owned prompt, history and output b
       yield { choices: [{ delta: { content: 'rights ✓' } }] };
     })();
   } });
-  const response = await POST(request(messages));
+  const response = await POST(request(chatBody));
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('Content-Type'), 'text/plain; charset=utf-8');
   assert.match(response.headers.get('Cache-Control'), /no-cache/);
@@ -194,6 +199,7 @@ test('a failed stream rejects the reader without closing an errored controller',
     signal = options.signal;
     return (async function* () {
       yield { choices: [{ delta: { content: 'partial' } }] };
+      await new Promise((resolve) => setTimeout(resolve, 10));
       throw new Error('secret upstream error');
     })();
   } })(request());
@@ -216,7 +222,7 @@ test('request cancellation aborts the upstream and returns 499 before headers', 
     controller.abort();
     assert.equal(options.signal.aborted, true);
     throw new Error('cancelled');
-  } })(request([userMessage], { signal: controller.signal }));
+  } })(request(chatBody, { signal: controller.signal }));
   assert.equal(response.status, 499);
 });
 
@@ -231,7 +237,7 @@ test('disconnect during streaming propagates to the upstream', async () => {
         await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }));
       }
     })();
-  } })(request([userMessage], { signal: controller.signal }));
+  } })(request(chatBody, { signal: controller.signal }));
   const reader = response.body.getReader();
   await reader.read();
   controller.abort();
@@ -239,20 +245,24 @@ test('disconnect during streaming propagates to the upstream', async () => {
   await assert.rejects(reader.read(), /response was interrupted/);
 });
 
-test('reader cancellation aborts the upstream and closes its iterator', async () => {
+test('reader cancellation aborts the upstream and persists a partial reply once', async () => {
   let signal;
-  let returned = false;
-  const response = await handler({ createCompletion: async (_, options) => {
-    signal = options.signal;
-    return {
-      [Symbol.asyncIterator]() { return this; },
-      async next() { return { done: false, value: { choices: [{ delta: { content: 'chunk' } }] } }; },
-      async return() { returned = true; return { done: true }; },
-    };
-  } })(request());
+  const saved = [];
+  const response = await handler({
+    store: { upsertUser: async () => {}, beginTurn: async () => ({
+      messages: [userMessage], finish: async (...args) => saved.push(args),
+    }) },
+    createCompletion: async (_, options) => {
+      signal = options.signal;
+      return (async function* () {
+        yield { choices: [{ delta: { content: 'partial' } }] };
+        if (!signal.aborted) await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      })();
+    },
+  })(request());
   const reader = response.body.getReader();
   await reader.read();
   await reader.cancel();
   assert.equal(signal.aborted, true);
-  assert.equal(returned, true);
+  assert.deepEqual(saved, [['partial', true]]);
 });

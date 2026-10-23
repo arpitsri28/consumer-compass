@@ -3,22 +3,28 @@ import { HttpError } from "./errors.js";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
-export function validateMessages(body, config) {
-  const messageSchema = z.object({
-    role: z.enum(["user", "assistant"]),
-    content: z.string().trim().min(1).max(config.CHAT_MAX_MESSAGE_CHARS),
-  }).strict();
-
-  const schema = z.array(messageSchema).min(1).max(config.CHAT_MAX_MESSAGES)
-    .refine((messages) => messages.at(-1)?.role === "user", {
-      message: "The last message must have role user.",
-    });
+function parse(schema, body) {
   const parsed = schema.safeParse(body);
   if (!parsed.success) {
-    throw new HttpError(400, "INVALID_REQUEST", "Invalid chat messages.",
+    throw new HttpError(400, "INVALID_REQUEST", "Invalid request.",
       parsed.error.issues.map(({ path, message }) => ({ path: path.join("."), message })));
   }
   return parsed.data;
+}
+
+export function validateChatRequest(body, config) {
+  return parse(z.object({
+    conversationId: z.string().uuid(),
+    message: z.string().trim().min(1).max(config.CHAT_MAX_MESSAGE_CHARS),
+  }).strict(), body);
+}
+
+export function validateConversationId(id) {
+  return parse(z.string().uuid(), id);
+}
+
+export function validateTitle(body) {
+  return parse(z.object({ title: z.string().trim().min(1).max(100) }).strict(), body).title;
 }
 
 export async function readJsonBody(request) {

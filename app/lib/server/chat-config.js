@@ -6,7 +6,6 @@ const positiveInteger = (fallback, max) =>
 
 const configSchema = z.object({
   OPENROUTER_MODEL: z.string().trim().min(1).default("meta-llama/llama-3.3-70b-instruct"),
-  CHAT_MAX_MESSAGES: positiveInteger(100, 500),
   CHAT_MAX_MESSAGE_CHARS: positiveInteger(8000, 32000),
   CHAT_HISTORY_MAX_MESSAGES: positiveInteger(20, 500),
   CHAT_HISTORY_MAX_CHARS: positiveInteger(24000, 1000000),
