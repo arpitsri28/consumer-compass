@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test, mock } from 'node:test';
+import { test, vi } from 'vitest';
 import { chatRequest, retryAfterSeconds, resolveChatRetry } from '../../app/lib/chat-client.js';
 
 const body = { conversationId: 'conversation', message: 'question' };
@@ -12,7 +12,7 @@ test('each request attaches the current Firebase token and propagates cancellati
   let calls = 0;
   const user = { getIdToken: async () => `token-${++calls}` };
   const controller = new AbortController();
-  mock.method(globalThis, 'fetch', async (_path, options) => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation( async (_path, options) => {
     assert.equal(options.headers.Authorization, `Bearer token-${calls}`);
     assert.equal(options.signal, controller.signal);
     assert.equal(options.cache, 'no-store');
@@ -22,17 +22,17 @@ test('each request attaches the current Firebase token and propagates cancellati
     await chatRequest(user, '/api/conversations', { signal: controller.signal });
     await chatRequest(user, '/api/conversations', { signal: controller.signal });
     assert.equal(calls, 2);
-  } finally { mock.restoreAll(); }
+  } finally { vi.restoreAllMocks(); }
 });
 
 test('HTTP errors preserve safe error codes, status and Retry-After', async () => {
-  mock.method(globalThis, 'fetch', async () => Response.json({ error: { code: 'RATE_LIMITED', message: 'Wait.' } }, {
+  vi.spyOn(globalThis, 'fetch').mockImplementation( async () => Response.json({ error: { code: 'RATE_LIMITED', message: 'Wait.' } }, {
     status: 429, headers: { 'Retry-After': '12' },
   }));
   try {
     await assert.rejects(chatRequest({ getIdToken: async () => 'token' }, '/api/chat'), (error) =>
       error.status === 429 && error.code === 'RATE_LIMITED' && error.retryAfter === 12 && error.message === 'Wait.');
-  } finally { mock.restoreAll(); }
+  } finally { vi.restoreAllMocks(); }
 });
 
 test('Retry-After accepts seconds and HTTP dates and ignores malformed headers', () => {

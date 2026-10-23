@@ -7,12 +7,11 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "npm run test:server && npm run test:client",
+    "test": "vitest run --project unit",
     "db:migrate": "node --conditions=react-server --experimental-default-type=module --env-file=.env.local scripts/migrate.mjs",
-    "test:db": "node --conditions=react-server --experimental-default-type=module --env-file=.env.local --test tests/*.integration.mjs",
-    "test:server": "node --conditions=react-server --experimental-default-type=module --test tests/*.test.mjs",
-    "test:client": "node --experimental-default-type=module --test tests/client/*.test.mjs",
-    "test:redis": "node --conditions=react-server --experimental-default-type=module --env-file=.env.local --test tests/redis/*.integration.mjs"
+    "test:db": "vitest run --project postgres",
+    "test:redis": "vitest run --project redis",
+    "test:all": "vitest run"
   },
   "dependencies": {
     "@emotion/react": "^11.13.0",
@@ -34,6 +33,8 @@
   },
   "devDependencies": {
     "eslint": "^8",
-    "eslint-config-next": "14.2.5"
+    "eslint-config-next": "14.2.5",
+    "vitest": "^4.1.12",
+    "vite": "^6.4.0"
   }
 }

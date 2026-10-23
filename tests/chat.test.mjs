@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { getChatConfig } from '../app/lib/server/chat-config.js';
 import { validateChatRequest, truncateHistory, readJsonBody } from '../app/lib/server/chat-validation.js';
 import { verifyRequestUser, readServiceAccount } from '../app/lib/server/firebase-admin.js';

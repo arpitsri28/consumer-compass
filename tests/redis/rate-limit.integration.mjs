@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { test } from 'node:test';
+import { test, describe, beforeAll, afterAll } from 'vitest';
 import { setTimeout as delay } from 'node:timers/promises';
 import { getRedis } from '../../app/lib/server/redis.js';
 import { createRateLimiter } from '../../app/lib/server/rate-limit.js';
@@ -8,7 +8,7 @@ import { getChatConfig } from '../../app/lib/server/chat-config.js';
 
 if (!process.env.TEST_REDIS_URL) throw new Error('Set TEST_REDIS_URL to a disposable Redis service.');
 process.env.REDIS_URL = process.env.TEST_REDIS_URL;
-const client = await getRedis();
+let client;
 const fixtureKeys = [];
 const uid = () => `phase3-test-${randomUUID()}`;
 const keyFor = (value) => {
@@ -19,9 +19,14 @@ const keyFor = (value) => {
 const config = getChatConfig({ CHAT_RATE_LIMIT_MAX_REQUESTS: '5', CHAT_RATE_LIMIT_WINDOW_SECONDS: '60' });
 const check = createRateLimiter({ getClient: getRedis });
 
-test('Redis fixed-window integration', async (t) => {
-  try {
-    await t.test('parallel requests share one atomic per-user quota', async () => {
+describe.sequential('Redis fixed-window integration', () => {
+  beforeAll(async () => { client = await getRedis(); });
+  afterAll(async () => {
+    if (!client) return;
+    try { if (fixtureKeys.length) await client.del(...fixtureKeys); }
+    finally { client.disconnect(); }
+  });
+    test('parallel requests share one atomic per-user quota', async () => {
       const user = uid();
       const key = keyFor(user);
       const results = await Promise.all(Array.from({ length: 20 }, () => check(user, config)));
@@ -31,11 +36,11 @@ test('Redis fixed-window integration', async (t) => {
       assert.equal(await client.get(key), '20');
       assert.ok(await client.pttl(key) > 0);
     });
-    await t.test('another uid starts with its own quota', async () => {
+    test('another uid starts with its own quota', async () => {
       const user = uid(); keyFor(user);
       assert.equal((await check(user, config)).allowed, true);
     });
-    await t.test('expired windows reset the quota and blocked calls do not extend the TTL', async () => {
+    test('expired windows reset the quota and blocked calls do not extend the TTL', async () => {
       const user = uid(); const key = keyFor(user);
       const short = { ...config, CHAT_RATE_LIMIT_MAX_REQUESTS: 1, CHAT_RATE_LIMIT_WINDOW_SECONDS: 1 };
       assert.equal((await check(user, short)).allowed, true);
@@ -45,15 +50,11 @@ test('Redis fixed-window integration', async (t) => {
       await delay(1100);
       assert.equal((await check(user, short)).allowed, true);
     });
-    await t.test('a counter missing its expiry is repaired atomically', async () => {
+    test('a counter missing its expiry is repaired atomically', async () => {
       const user = uid(); const key = keyFor(user);
       await client.set(key, '3');
       assert.equal(await client.pttl(key), -1);
       assert.equal((await check(user, config)).allowed, true);
       assert.ok(await client.pttl(key) > 0);
     });
-  } finally {
-    if (fixtureKeys.length) await client.del(...fixtureKeys);
-    client.disconnect();
-  }
 });

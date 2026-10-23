@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { createRateLimiter, RATE_LIMIT_SCRIPT } from '../app/lib/server/rate-limit.js';
 import { createChatHandler } from '../app/lib/server/chat-handler.js';
 import { getChatConfig } from '../app/lib/server/chat-config.js';
