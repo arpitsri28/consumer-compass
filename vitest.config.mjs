@@ -8,6 +8,7 @@ export default defineConfig({
   resolve: { alias: { 'server-only': fileURLToPath(new URL('./tests/support/server-only.js', import.meta.url)) } },
   test: {
     environment: 'node',
+    env: { LOG_LEVEL: 'silent' },
     restoreMocks: true,
     unstubEnvs: true,
     pool: 'forks',

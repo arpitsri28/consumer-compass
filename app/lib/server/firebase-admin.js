@@ -2,6 +2,7 @@ import "server-only";
 import { cert, getApps, initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { HttpError } from "./errors.js";
+import { setRequestUser } from "./logger.js";
 
 const APP_NAME = "consumer-compass-server";
 
@@ -52,6 +53,7 @@ export async function verifyRequestUser(request, authFactory = getAdminAuth) {
   const auth = authFactory();
   try {
     const decoded = await auth.verifyIdToken(match[1], true);
+    setRequestUser(decoded.uid);
     return { uid: decoded.uid, email: decoded.email ?? null };
   } catch (error) {
     if (invalidTokenCodes.has(error.code)) {

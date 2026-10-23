@@ -12,69 +12,79 @@ afterEach(async () => { await Promise.all(fixtures.splice(0).map((path) => rm(pa
 async function setup(extra = {}) {
   const root = await mkdtemp(join(tmpdir(), 'compass-deploy-'));
   fixtures.push(root);
-  const bin = join(root, 'bin'); const app = join(root, 'app'); const state = join(root, 'state');
-  await Promise.all([mkdir(bin), mkdir(app), mkdir(state)]);
-  await writeFile(join(app, 'runtime.env'), 'DATABASE_URL=fixture-only\n');
-  await writeFile(join(state, 'consumer-compass-app'), 'original');
+  const bin = join(root, 'bin'); const app = join(root, 'app');
+  await Promise.all([mkdir(bin), mkdir(join(app, 'scripts'), { recursive: true })]);
+  for (const file of ['runtime.env', '.env.production', 'docker-compose.prod.yml']) await writeFile(join(app, file), 'fixture\n');
+  const oldImage = 'consumer-compass:previous';
+  await writeFile(join(app, '.deployed-image'), oldImage + '\n');
   await copyFile(new URL('../scripts/deploy-ec2.sh', import.meta.url), join(root, 'deploy-ec2.sh'));
+  await copyFile(new URL('../scripts/compose-prod.sh', import.meta.url), join(app, 'scripts/compose-prod.sh'));
   await writeFile(join(root, 'image.tar.gz'), gzipSync('fake image payload'));
   await writeFile(join(root, 'image.sha256'), 'fixture');
   const executable = async (name, content) => writeFile(join(bin, name), content, { mode: 0o755 });
   await executable('docker', `#!/usr/bin/env bash
 set -eu
-printf '%s\\n' "$*" >> "$TEST_LOG"
-case "$1 \${2:-}" in
-  'network inspect') exit 0 ;;
-  'load '*) cat >/dev/null; exit 0 ;;
-  'image inspect') printf '%s\\n' "$TEST_REVISION"; exit 0 ;;
-  'container inspect') [[ -f "$TEST_STATE/$3" ]]; exit $? ;;
-  'run --rm') [[ "\${TEST_MIGRATION_FAIL:-0}" != 1 ]]; exit $? ;;
-  'run -d') printf 'replacement' > "$TEST_STATE/consumer-compass-app"; exit 0 ;;
-  'stop --time') exit 0 ;;
-  'rename '*) mv "$TEST_STATE/$2" "$TEST_STATE/$3"; exit 0 ;;
-  'start '*) touch "$TEST_STATE/restored"; exit 0 ;;
-  'rm '*) last="\${!#}"; rm -f "$TEST_STATE/$last"; exit 0 ;;
-  *) echo "Unexpected Docker command" >&2; exit 1 ;;
+printf '%s %s\\n' "\${APP_IMAGE:-unset}" "$*" >> "$TEST_LOG"
+case "$1" in
+  load) cat >/dev/null ;;
+  image) printf '%s\\n' "$TEST_REVISION" ;;
+  compose)
+    case "$*" in
+      *'run --rm'*) [[ "\${TEST_MIGRATION_FAIL:-0}" != 1 ]] ;;
+      *'up -d'*) [[ "\${TEST_READY_FAIL:-0}" != 1 || "$APP_IMAGE" == consumer-compass:previous ]] ;;
+      *'exec -T nginx'*) exit 0 ;;
+      *) exit 1 ;;
+    esac ;;
+  *) exit 1 ;;
 esac
 `);
-  await executable('curl', '#!/usr/bin/env bash\n[[ "${TEST_READY_FAIL:-0}" != 1 ]]\n');
-  for (const name of ['flock', 'sleep', 'sha256sum']) await executable(name, '#!/usr/bin/env bash\nexit 0\n');
+  await executable('curl', '#!/usr/bin/env bash\n[[ "${TEST_HTTP_FAIL:-0}" != 1 ]]\n');
+  for (const name of ['flock', 'sha256sum']) await executable(name, '#!/usr/bin/env bash\nexit 0\n');
   const revision = 'a'.repeat(40);
   const run = (value = revision) => spawnSync('bash', [join(root, 'deploy-ec2.sh'), value], {
     encoding: 'utf8', timeout: 5000,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, COMPASS_DEPLOY_DIR: app,
-      TEST_STATE: state, TEST_LOG: join(root, 'commands'), TEST_REVISION: revision, ...extra },
+      TEST_LOG: join(root, 'commands'), TEST_REVISION: revision, ...extra },
   });
-  return { run, state, app, commands: () => readFile(join(root, 'commands'), 'utf8') };
+  return { run, app, oldImage, revision, commands: () => readFile(join(root, 'commands'), 'utf8') };
 }
 
-test('deployment runs migrations before replacing the app and retains the old container', async () => {
+test('deployment migrates before replacing the app, reloads Nginx and records rollback image', async () => {
   const fixture = await setup(); const result = fixture.run();
   assert.equal(result.status, 0, result.stderr);
   const commands = await fixture.commands();
-  assert.ok(commands.indexOf('run --rm') < commands.indexOf('stop --time'));
-  assert.equal(await readFile(join(fixture.state, 'consumer-compass-app'), 'utf8'), 'replacement');
-  assert.equal(await readFile(join(fixture.state, 'consumer-compass-app-previous'), 'utf8'), 'original');
+  assert.ok(commands.indexOf('run --rm') < commands.indexOf('up -d'));
+  assert.match(commands, /nginx -s reload/);
+  assert.equal((await readFile(join(fixture.app, '.deployed-image'), 'utf8')).trim(), `consumer-compass:${fixture.revision}`);
+  assert.equal((await readFile(join(fixture.app, '.previous-image'), 'utf8')).trim(), fixture.oldImage);
 });
 
-test('migration failure leaves the existing app untouched', async () => {
+test('migration failure leaves the existing release untouched', async () => {
   const fixture = await setup({ TEST_MIGRATION_FAIL: '1' });
   assert.notEqual(fixture.run().status, 0);
-  assert.doesNotMatch(await fixture.commands(), /stop --time/);
-  assert.equal(await readFile(join(fixture.state, 'consumer-compass-app'), 'utf8'), 'original');
+  assert.doesNotMatch(await fixture.commands(), /up -d/);
+  assert.equal((await readFile(join(fixture.app, '.deployed-image'), 'utf8')).trim(), fixture.oldImage);
 });
 
-test('failed replacement readiness restores and starts the previous app', async () => {
-  const fixture = await setup({ TEST_READY_FAIL: '1' }); const result = fixture.run();
-  assert.notEqual(result.status, 0);
-  assert.equal(await readFile(join(fixture.state, 'consumer-compass-app'), 'utf8'), 'original');
-  assert.match(await fixture.commands(), /start consumer-compass-app/);
-});
+for (const failure of ['TEST_READY_FAIL', 'TEST_HTTP_FAIL']) {
+  test(`${failure} restores the previous app image without advancing deployment state`, async () => {
+    const fixture = await setup({ [failure]: '1' });
+    assert.notEqual(fixture.run().status, 0);
+    assert.match(await fixture.commands(), /consumer-compass:previous compose .*up -d/);
+    assert.equal((await readFile(join(fixture.app, '.deployed-image'), 'utf8')).trim(), fixture.oldImage);
+  });
+}
 
-test('invalid revision or missing runtime environment fails before Docker changes', async () => {
+test('invalid revision or missing server configuration fails before Docker changes', async () => {
   const fixture = await setup();
   assert.notEqual(fixture.run('bad; command').status, 0);
   await rm(join(fixture.app, 'runtime.env'));
   assert.notEqual(fixture.run().status, 0);
   await assert.rejects(fixture.commands(), { code: 'ENOENT' });
+});
+
+test('a revision mismatch fails before migration', async () => {
+  const fixture = await setup({ TEST_REVISION: 'b'.repeat(40) });
+  assert.notEqual(fixture.run().status, 0);
+  assert.doesNotMatch(await fixture.commands(), /run --rm|up -d/);
 });

@@ -18,3 +18,10 @@ credentials
 .ssh
 .agents
 .codex
+state
+runtime.env
+monitoring.env
+backups
+.deployed-image
+.previous-image
+.cloudwatch-enabled

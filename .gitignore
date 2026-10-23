@@ -31,6 +31,13 @@ yarn-error.log*
 *service-account*.json
 *serviceAccount*.json
 /credentials/
+/state/
+/runtime.env
+/monitoring.env
+/.deployed-image
+/.previous-image
+/.cloudwatch-enabled
+/backups/
 *.key
 
 # vercel
@@ -39,5 +46,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+report.md
+
 
 

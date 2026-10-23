@@ -1,0 +1,8 @@
+[Unit]
+Description=Publish Consumer Compass HTTPS health result to CloudWatch
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/opt/consumer-compass/monitoring.env
+ExecStart=/bin/bash /opt/consumer-compass/scripts/health-metric.sh

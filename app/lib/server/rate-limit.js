@@ -1,6 +1,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import { getRedis } from "./redis.js";
+import { logEvent } from "./logger.js";
 
 export const RATE_LIMIT_SCRIPT = `
 local count = redis.call('INCR', KEYS[1])
@@ -16,7 +17,7 @@ let lastWarning = 0;
 function warnUnavailable() {
   const now = Date.now();
   if (now - lastWarning >= 60000) {
-    console.warn("Redis rate limiting is unavailable; allowing chat requests without a quota check.");
+    logEvent("warn", "rate_limit_unavailable_fail_open");
     lastWarning = now;
   }
 }

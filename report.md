@@ -1,293 +1,263 @@
 # Consumer Compass — Technical Project Report
 
-Consumer Compass is a small full-stack web application that provides an AI chat interface for questions about Ontario consumer rights. It combines Firebase authentication, a Material UI frontend, and a Next.js API endpoint that streams model responses through OpenRouter.
+**Snapshot date:** 2026-10-23
+**Scope:** Current checked-out source, configuration, tests, and deployment documentation. This report describes repository contents; it does not imply that every optional integration or deployment workflow is live.
 
-The code implements the main prototype workflow—register, log in, and chat—but has gaps around authorization, error handling, and conversation management.
+## Executive summary
 
-This report is based on a review of all application source files and project configuration. Dependencies were not installed, the application was not run, and external services were not verified. Findings describe the checked-in implementation rather than verified runtime behavior.
+Consumer Compass is a full-stack Next.js application for an Ontario consumer-rights chat assistant. The browser authenticates with Firebase. App Router API routes verify Firebase ID tokens with Firebase Admin, persist conversations in PostgreSQL, apply a per-user Redis request quota, and stream model output from OpenRouter. Conversation ownership is enforced in database queries. The UI supports saved conversations, streamed responses, retrying incomplete replies, and stopping generation.
 
-## 1. Technology stack
+The repository also contains Vitest unit and service-integration tests, a Docker standalone build, Compose configurations, manual EC2 deployment scripts, HTTPS/Nginx setup, and optional AWS backup and monitoring scripts. The deployment design targets a single x86-64 EC2 host and explicitly has downtime during app replacement; it is not a high-availability or load-tested architecture.
 
-The exact versions recorded in `package-lock.json` are:
+The main product limitation is knowledge quality: the assistant uses a static system prompt and model generation, without retrieval, authoritative legal citations, legal review, or automated fact verification. Redis rate limiting intentionally fails open during Redis outages. Real Firebase/OpenRouter use and several optional AWS operations require operator credentials and are not proven merely by source or local tests.
 
-| Technology | Version | Role |
-|---|---|---|
-| Next.js | 14.2.5 | File-based routing, application shell, server API |
-| React / React DOM | 18.3.1 | Components, state, context, effects |
-| Material UI | 5.16.6 | Forms, navigation, menus, layout, chat bubbles |
-| Emotion React | 11.13.0 | Styling infrastructure for Material UI |
-| Firebase | 10.12.5 | Browser-side authentication |
-| OpenAI JavaScript SDK | 4.54.0 | Client for OpenRouter's compatible API |
-| ESLint | 8.x dependency range | Static linting with Next.js rules |
+## 1. Technology and runtime
 
-The project uses JavaScript and JSX, with no TypeScript configuration or application types. `react-router-dom` 6.26.0 is installed, but the application uses Next.js navigation instead.
+| Area                      | Implementation                                                       |
+| ------------------------- | -------------------------------------------------------------------- |
+| Application framework     | Next.js 14 App Router, React 18, JavaScript/JSX                      |
+| UI                        | Material UI 5, Emotion, `react-markdown`                             |
+| Browser identity          | Firebase Authentication 10, email/password                           |
+| Server identity           | Firebase Admin 13, ID-token verification including revocation checks |
+| Model provider            | OpenAI JavaScript SDK compatible client pointed at OpenRouter        |
+| Request/config validation | Zod 4                                                                |
+| Persistent data           | PostgreSQL via `pg` connection pool                                  |
+| Rate-limit state          | Redis via `ioredis` and an atomic Lua script                         |
+| Logging                   | Pino with request context through `AsyncLocalStorage`                |
+| Testing                   | Vitest 4, Vite 6; PostgreSQL and Redis integration projects          |
+| Runtime image             | Node.js 22 Debian slim, Next standalone output, non-root `node` user |
 
-The application and API live in the same Next.js project. There is no separate backend service in this repository. Dependencies and commands are defined in [package.json](package.json).
+Dependency ranges and commands are maintained in [package.json](package.json); the lockfile is `package-lock.json`. The project has no TypeScript compiler configuration. The `@/*` import alias maps to the repository root through [jsconfig.json](jsconfig.json). `react-router-dom` is present as a dependency, but navigation is implemented with Next.js App Router and `next/navigation`.
 
-## 2. Architecture and data flow
+## 2. Architecture and request flow
 
 ```mermaid
-flowchart TD
-    U[Browser: Next.js and React UI]
-    A[Firebase Authentication]
-    C[React AuthContext]
-    S[POST /api/chat]
-    R[OpenRouter API]
-    M[Configured Llama model]
+flowchart LR
+    Browser[Next.js client UI]
+    Firebase[Firebase Authentication]
+    Routes[Next.js API routes]
+    Admin[Firebase Admin token verification]
+    Redis[Redis quota counter]
+    DB[(PostgreSQL)]
+    Router[OpenRouter API]
+    Model[Configured chat model]
 
-    U -->|Register, log in, log out| A
-    A -->|Authentication state changes| C
-    C -->|User state and UI redirects| U
-    U -->|Conversation as JSON| S
-    S -->|System prompt and conversation| R
-    R --> M
-    M -->|Generated text| R
-    R -->|Streaming chunks| S
-    S -->|UTF-8 text stream| U
+    Browser <-->|Sign in, sign out, ID token| Firebase
+    Browser -->|Bearer token + JSON| Routes
+    Routes --> Admin
+    Routes --> Redis
+    Routes <-->|Owned conversation reads/writes| DB
+    Routes -->|Prompt + bounded history| Router
+    Router --> Model
+    Model --> Router
+    Router -->|Text stream| Routes
+    Routes -->|UTF-8 text stream| Browser
 ```
 
-There are two largely independent flows:
+The browser obtains a Firebase ID token for protected API requests. The server verifies it and derives the user ID from the verified token; it does not trust a user ID supplied in request data. Authenticated routes upsert the user record and scope conversation operations by that ID. The chat handler loads history from PostgreSQL, appends the server-owned system prompt, calls OpenRouter, and streams text while persisting the final or incomplete assistant response.
 
-- **Authentication:** the browser communicates directly with Firebase.
-- **Chat generation:** the browser sends messages to the Next.js server, which calls OpenRouter.
+The source is organized around the Next.js App Router in `app/`, shared UI in `app/components/`, browser helpers in `app/lib/`, server-only services in `app/lib/server/`, SQL migrations in `migrations/`, automated tests in `tests/`, and deployment assets in `deploy/`, `scripts/`, and `docs/`.
 
-The key architectural gap is that these flows are not connected on the server. The chat endpoint does not verify the user's Firebase identity.
+## 3. Web pages and API routes
 
-## 3. Repository structure and routes
+| Path                             | Purpose                                                                              |
+| -------------------------------- | ------------------------------------------------------------------------------------ |
+| `/`                              | Product introduction and deployment notice when Firebase web configuration is absent |
+| `/auth/login`                    | Email/password sign-in                                                               |
+| `/auth/register`                 | Email/password registration                                                          |
+| `/auth/logout`                   | Waits for Firebase sign-out, then redirects; offers retry on failure                 |
+| `/chat`                          | Authenticated conversation workspace and sidebar                                     |
+| `/profile`                       | Authenticated profile page with the signed-in email                                  |
+| `GET /api/health`                | Unauthenticated dependency health for PostgreSQL and Redis                           |
+| `POST /api/chat`                 | Authenticated, rate-limited chat turn and text stream                                |
+| `GET /api/conversations`         | List the current user's conversations                                                |
+| `POST /api/conversations`        | Create an empty conversation                                                         |
+| `GET /api/conversations/[id]`    | Retrieve an owned conversation and transcript                                        |
+| `PATCH /api/conversations/[id]`  | Rename an owned conversation                                                         |
+| `DELETE /api/conversations/[id]` | Delete an owned conversation and its messages                                        |
 
-The app uses the Next.js App Router, with routes defined under `app/`.
+Every API route declares the Node.js runtime and is dynamic. The API route modules wire the underlying handlers and wrap them in request logging. The core logic is separated into injectable handlers/stores so unit tests can exercise behavior without real cloud services.
 
-| Route | Source | Implementation |
-|---|---|---|
-| `/` | [app/page.js](app/page.js) | Welcome page explaining Consumer Compass |
-| `/auth/register` | [app/auth/register/page.js](app/auth/register/page.js) | Email/password account creation |
-| `/auth/login` | [app/auth/login/page.js](app/auth/login/page.js) | Email/password sign-in |
-| `/auth/logout` | [app/auth/logout/page.js](app/auth/logout/page.js) | Sign-out followed by login redirect |
-| `/chat` | [app/chat/page.js](app/chat/page.js) | Conversation interface with streamed responses |
-| `/profile` | [app/profile/page.js](app/profile/page.js) | Displays the authenticated user's email |
-| `/api/chat` | [app/api/chat/route.js](app/api/chat/route.js) | Server endpoint that requests model output |
+## 4. Authentication and authorization
 
-Shared components provide the navigation bar, side drawer, account menu, and authentication form:
+The browser Firebase configuration is read from six `NEXT_PUBLIC_FIREBASE_*` variables in [app/lib/firebase.js](app/lib/firebase.js). Firebase is initialized only when `apiKey`, `authDomain`, `projectId`, and `appId` are nonempty. `AuthProvider` subscribes to Firebase auth-state changes and exposes `currentUser`, `userLoggedIn`, `loading`, and `firebaseConfigured`. `AuthGuard` waits for restoration before redirecting protected pages to login, and redirects authenticated users away from guest-only auth pages.
 
-- [Navbar.jsx](app/components/Navbar.jsx)
-- [TemporaryDrawer.jsx](app/components/TemporaryDrawer.jsx)
-- [AccountMenu.jsx](app/components/AccountMenu.jsx)
-- [AuthForm.jsx](app/components/AuthForm.jsx)
+The browser sends `Authorization: Bearer <Firebase ID token>` using `currentUser.getIdToken()`. [app/lib/server/firebase-admin.js](app/lib/server/firebase-admin.js) accepts either a service-account JSON environment variable or the individual project ID, client email, and private-key settings. It verifies tokens with `verifyIdToken(token, true)`, which includes revocation/disabled-user checks. Missing credentials produce a safe configuration error; invalid/expired/revoked credentials return 401; Firebase infrastructure failures map to 503.
 
-The profile page is minimal: it does not offer profile editing, account deletion, or password management.
+Chat and conversation routes require this verified identity. Ownership is checked in SQL for every read, write, rename, and delete. A valid UUID belonging to another user is treated as not found (404), avoiding disclosure of another user's conversation. The health endpoint is intentionally unauthenticated and returns only boolean dependency status.
 
-## 4. Authentication implementation
+Firebase web settings are public and embedded at build time; changes require rebuilding the image. Firebase Admin credentials and OpenRouter keys are server-only runtime settings and must not be exposed with `NEXT_PUBLIC_` names. The deployment docs require client and admin settings to refer to the same Firebase project.
 
-Authentication is split across three files:
+## 5. API contracts and validation
 
-- [firebase.js](app/lib/firebase.js) initializes Firebase and exports its authentication instance.
-- [auth.js](app/lib/auth.js) wraps Firebase operations.
-- [AuthContext](app/context/authContext/index.jsx) shares authentication state with components.
+### Chat request
 
-The context exposes:
+`POST /api/chat` requires `Content-Type: application/json` and a Firebase bearer token. The strict JSON object contains a valid UUID `conversationId` and exactly one of:
 
-```js
+```json
 {
-  currentUser,
-  userLoggedIn,
-  loading
+  "conversationId": "123e4567-e89b-42d3-a456-426614174000",
+  "message": "Can I cancel my purchase?"
 }
 ```
 
-On mount, `AuthProvider` subscribes to Firebase's `onAuthStateChanged`. When Firebase reports a user, it updates `currentUser` and `userLoggedIn`; otherwise, it clears them. It unsubscribes when the provider unmounts.
+or an incomplete assistant message ID to retry:
 
-The intended login sequence is:
-
-1. `AuthForm` collects email and password.
-2. The login page calls `signInWithEmailAndPassword`.
-3. Firebase updates the authentication state.
-4. The context updates.
-5. The login page redirects to `/chat`.
-
-Registration follows the same pattern using `createUserWithEmailAndPassword`.
-
-### Authentication issues
-
-- **Authentication readiness is ignored.** The context starts with `userLoggedIn: false` and `loading: true`, but protected pages redirect without checking `loading`. A returning user can be sent to login before Firebase finishes restoring their session.
-- **Registration failure handling is broken.** The catch handler in `app/auth/register/page.js` calls `setIsSigningIn(false)`, which is undefined in that component. It should reset `isRegistering`. A failed registration therefore also triggers a JavaScript error.
-- **Some helpers are incomplete.** Google sign-in, password reset, and password update reference `signInWithPopup`, `sendPasswordResetEmail`, and `updatePassword`, respectively, without importing them. Google sign-in is also commented out in the UI.
-- **The homepage nests another `AuthProvider` inside the root provider.** This creates an unnecessary second authentication subscription and independent context state.
-- **Redirects are implemented inconsistently.** Registration and profile redirects occur during rendering; the login and chat pages use effects.
-- **Logout does not await sign-out.** The logout page calls `doSignOut()` and immediately redirects, without explicit error handling.
-
-## 5. Chat state and request lifecycle
-
-The [chat page](app/chat/page.js) maintains two pieces of local state:
-
-```js
-messages // Array of { role, content }
-message  // Current input field value
+```json
+{
+  "conversationId": "123e4567-e89b-42d3-a456-426614174000",
+  "retryMessageId": "42"
+}
 ```
 
-It starts with a predefined assistant greeting welcoming the user to the Ontario Consumer Rights Assistant.
+Unknown fields and malformed IDs are rejected. New messages are trimmed, nonempty, and bounded by `CHAT_MAX_MESSAGE_CHARS`. Retry IDs are positive decimal integers limited to PostgreSQL `bigint`. The request body is streamed into a bounded buffer and rejected above 1 MiB before JSON parsing. The retry request can target only the latest incomplete assistant message in an owned conversation.
 
-When Send is clicked, the page:
+Successful generation is a raw `text/plain; charset=utf-8` stream. Responses set `Cache-Control: no-cache, no-store, no-transform`, `X-Accel-Buffering: no`, and `X-Content-Type-Options: nosniff`. The stream transports generated text only; it does not expose provider event framing, token usage, or finish metadata.
 
-1. Builds a user message from the input.
-2. Clears the input.
-3. Adds the user message and an empty assistant message to the UI.
-4. Posts the existing conversation plus the new user message to `/api/chat`.
-5. Reads the response stream.
-6. Appends each decoded text chunk to the last message.
+### Conversation requests
 
-The empty assistant message acts as the placeholder that fills as the model responds. Functional state updates preserve previously received chunks during rendering.
+All conversation routes require bearer authentication. List returns `{ "conversations": [...] }`; create returns a 201 response containing `{ "conversation": ... }`; retrieval returns the conversation and messages; rename accepts a strict `{ "title": "..." }` body, trimmed to a nonempty value of at most 100 characters; deletion returns 204. Conversation responses use `Cache-Control: no-store`.
 
-### Conversation storage and context
+### Error behavior
 
-Conversation history exists only in React memory. There is no database integration, conversation identifier, local-storage persistence, or saved transcript. Reloading or remounting the chat page resets it.
+Pre-stream errors use a JSON envelope with a stable error code, safe message, and optional field-validation details. Known errors use their explicit HTTP status; unexpected errors return a generic 500 without internal details. Relevant statuses include 400 for malformed requests, 401 for invalid/missing tokens, 404 for missing/unowned conversations, 409 for busy conversations or invalid retry state, 413 for request bodies over 1 MiB, 429 for the application quota, 499 for cancellation before a stream response, 502 for other provider failures, and 503 for unavailable configuration/services.
 
-The full conversation is resent on every request. This gives the model multi-turn context, but increases request size and model input as the conversation grows. There is no truncation or summarization mechanism.
+Once a streaming response has started, its HTTP status cannot be changed. A mid-stream failure terminates the stream; it cannot be represented as a new JSON error response. Logs can therefore record a request with status 200 and a stream outcome of `error`, `aborted`, or `cancelled`.
 
-Firebase is used for authentication only in the application source. The presence of Firebase project configuration does not imply that the app stores chats in Firestore or another Firebase database.
+## 6. Persistence and turn lifecycle
 
-### Chat UI limitations
+The initial schema is [migrations/001_conversations.sql](migrations/001_conversations.sql):
 
-- Empty messages can be submitted.
-- Send remains enabled during generation.
-- There is no cancellation or retry control.
-- Errors are logged to the console without a user-facing message.
-- The fetch handler does not check `response.ok`.
-- Responses render as ordinary text, without Markdown handling.
-- There is no explicit automatic scrolling.
-- There is no native form submission or Enter-key handler for sending messages.
+| Table           | Data and constraints                                                                                       |
+| --------------- | ---------------------------------------------------------------------------------------------------------- |
+| `users`         | Firebase UID primary key, nullable email, creation timestamp                                               |
+| `conversations` | UUID primary key, user foreign key, 1–100 character title, created/updated timestamps                      |
+| `messages`      | Generated `bigint` ID, conversation foreign key, `user`/`assistant` role, text, incomplete flag, timestamp |
 
-The most significant chat-state bug concerns overlapping requests. Every stream appends to the last message in the array. If a second request starts before the first finishes, both streams can update the same final message and mix their responses.
+Foreign keys cascade user deletion to conversations and conversation deletion to messages. User messages must have nonempty content and cannot be marked incomplete. Assistant placeholders can be empty and incomplete. Indexes support conversation lists ordered by user and update time, plus transcript ordering by conversation and creation time. PostgreSQL `bigint` message IDs are represented as strings in JSON to avoid JavaScript precision loss.
 
-## 6. AI backend and streaming
+The migration runner [scripts/migrate.mjs](scripts/migrate.mjs) applies lexically sorted files matching the numbered SQL naming convention. It creates `schema_migrations`, takes a PostgreSQL advisory lock to serialize runners, applies each migration in a transaction, records successful versions, and skips already-applied files. There are no down migrations; applied SQL should not be edited.
 
-The only custom server endpoint is [app/api/chat/route.js](app/api/chat/route.js).
+For a new chat turn, the store acquires a PostgreSQL **session-level advisory lock** for the conversation, verifies ownership, then uses a short transaction to auto-title an empty conversation, insert the user row and incomplete assistant placeholder, and load bounded complete history. It commits before calling the model but keeps the database connection and advisory lock for the generation. No transaction remains open during the provider call. Concurrent generation or deletion for the same conversation returns 409; unrelated conversations can proceed independently. Rename can occur while a model response is running.
 
-It initializes the OpenAI SDK with:
+On normal completion, generated assistant text is saved and marked complete before the response stream closes. On cancellation, timeout, or provider failure, text already accumulated by the server is saved with `incomplete=true`. Retry replaces the latest incomplete assistant row rather than appending another user question. Finalization is guarded to happen once when abort/error signals race. A fixed 120-second handler deadline bounds the request/generation lifecycle; the OpenRouter SDK timeout is 60 seconds and automatic SDK retries are disabled.
 
-```js
-baseURL: "https://openrouter.ai/api/v1"
-apiKey: process.env.OPENROUTER_API_KEY
-```
+A process crash before finalization can leave an incomplete placeholder and lose text not yet committed. Generation holds one pooled PostgreSQL connection while streaming, so pool size bounds simultaneous work. The session advisory-lock design requires session-preserving connections and is incompatible with transaction-pooling proxies such as PgBouncer transaction mode. Conversation lists and transcripts are not paginated.
 
-The SDK is being used as a client for OpenRouter. The configured model identifier is:
+## 7. Model integration and domain prompt
 
-```text
-meta-llama/llama-3.1-8b-instruct:free
-```
+[app/lib/server/openrouter.js](app/lib/server/openrouter.js) creates the OpenAI SDK client with base URL `https://openrouter.ai/api/v1`. The default model is `meta-llama/llama-3.3-70b-instruct`, overridden by `OPENROUTER_MODEL`; the API key is `OPENROUTER_API_KEY`. The configured identifier and account access are not checked against the live provider at build time.
 
-This is the identifier in the repository; its present availability has not been checked.
+The server owns the system prompt in [app/lib/server/system-prompt.js](app/lib/server/system-prompt.js). It frames the assistant around Ontario consumer rights and includes topics/examples covering cooling-off periods, misrepresentation, delivery, vouchers, reward points, scams, and complaints. The prompt is ordinary application text, not a legal knowledge base. There is no retrieval augmented generation, legal corpus, vector index, browsing integration, citation verification, or fine-tuning process. The application therefore cannot guarantee that generated legal guidance or examples are current or correct; this report does not assess the legal accuracy of those examples.
 
-The endpoint expects the request body to be a message array, prepends its own system message, and requests streaming generation:
+History is read from PostgreSQL, excludes incomplete assistant rows, and is bounded by the most recent message count and total content characters. Whole messages are selected; truncation does not split a message. The server adds its own system prompt and applies `CHAT_MAX_OUTPUT_TOKENS` to the provider request. Character limits are not token counts.
 
-```js
-messages: [
-  { role: "system", content: systemPrompt },
-  ...data
-],
-stream: true
-```
+## 8. Rate limiting, logging, and health
 
-### Domain specialization
+The chat endpoint checks a Redis fixed-window quota after token verification and configuration parsing, before request-body validation, database writes, or provider use. The default is 10 authenticated chat requests per 60 seconds per Firebase UID. An atomic Lua script increments the counter, establishes/repairs its TTL, and returns the remaining time. Keys are namespaced and include a SHA-256 hash of the UID, not the raw UID. The threshold request is allowed; subsequent requests receive 429 and `Retry-After`. Retries and authenticated malformed/unowned requests also count. Other API routes do not use this limiter.
 
-The system prompt defines an Ontario consumer-rights assistant and includes the following topics:
+Redis has 500 ms connection/command timeouts, no offline queue, and no command retry loop. Redis failure intentionally **fails open**: the chat request proceeds and a generic warning is logged at most once per minute per process. Thus Redis is an abuse/spending guard, not a hard provider billing limit. Redis runs without persistence in the supplied Compose stacks, so restart resets counters.
 
-- Cooling-off periods.
-- Misrepresentation.
-- Delivery of goods.
-- Group deal vouchers.
-- Reward points.
-- Scams and fraud protection.
-- Consumer complaints and reporting scams.
+All exported API handlers use Pino request logging. Each response gets an `X-Request-ID`; structured request completion fields include request ID, method, route template, status, latency, outcome, and verified UID when available. `AsyncLocalStorage` isolates user identity between concurrent requests. Logs redact/remove sensitive common fields and application events use static names; request bodies, prompts, messages, provider errors, and credentials are not intentionally logged. Streaming request latency measures through EOF/cancellation rather than only time to first byte.
 
-It also embeds example questions and answers to guide the model's behavior.
+`GET /api/health` checks `SELECT 1` against PostgreSQL and `PING` against Redis concurrently. It returns 200 with `{status:"ok", checks:{database:true,redis:true}}` only when both pass; otherwise it returns 503 and boolean check results. It does not check Firebase or OpenRouter. The Docker health check uses this endpoint. An unhealthy-but-running process is not automatically restarted just by Docker's `restart` policy.
 
-This is prompt-based specialization. The repository contains no retrieval pipeline, legal document index, vector database, browsing integration, or fine-tuning workflow. Responses depend on the configured model and the instructions and examples embedded in the prompt. The implementation does not verify legal statements or attach authoritative citations. This report does not assess the legal accuracy of the embedded examples.
+## 9. Frontend behavior and safety
 
-### Streaming implementation
+The root layout remains a server component, exports title/description metadata, and mounts a client `Providers` component containing one `AuthProvider`. MUI provides navigation, forms, dialogs, alerts, and layout. The chat workspace is keyed by Firebase UID so state is not reused when users change.
 
-The server:
+The chat page loads the latest updated conversation on entry. It provides create/open/rename/delete, auto-creates a conversation on the first send when needed, and refreshes transcript/list data after generation. Busy guards prevent overlapping operations. Enter submits, Shift+Enter inserts a newline, and IME composition is respected. Stop aborts the generation fetch while allowing transcript reconciliation. Error notices can offer retry and honor `Retry-After`; ambiguous failures reload saved state and restore the draft for review rather than blindly resending. The list scrolls to recent content.
 
-1. Iterates over upstream completion chunks.
-2. Extracts `choices[0]?.delta?.content`.
-3. Encodes the text using `TextEncoder`.
-4. Enqueues the bytes into a Web `ReadableStream`.
-5. Returns that stream through `NextResponse`.
+Assistant output renders with `react-markdown`; raw HTML is skipped, remote images are disallowed, and default URL sanitization is retained. Links open in a new tab with `noopener noreferrer`. User content is rendered as text. There is no HTML injection plugin or `dangerouslySetInnerHTML` path in the Markdown renderer.
 
-The browser uses `TextDecoder` to reconstruct the text. The app forwards a raw text stream, without retaining upstream event framing or metadata such as token usage and completion reasons. It does not explicitly set streaming response headers.
+## 10. Configuration reference
 
-## 7. Server-side gaps
+Configuration templates are [`.env.example`](.env.example), [deploy/runtime.env.example](deploy/runtime.env.example), and [deploy/production.env.example](deploy/production.env.example). Values below describe the current code defaults and templates.
 
-The most consequential issue is missing API authorization.
+| Setting                                    | Purpose and default                                                                  |
+| ------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `NEXT_PUBLIC_FIREBASE_API_KEY`             | Firebase browser app configuration                                                   |
+| `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN`         | Firebase browser app configuration                                                   |
+| `NEXT_PUBLIC_FIREBASE_PROJECT_ID`          | Firebase browser app configuration                                                   |
+| `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET`      | Firebase browser app configuration; app does not currently use Firebase Storage      |
+| `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID` | Firebase browser app configuration                                                   |
+| `NEXT_PUBLIC_FIREBASE_APP_ID`              | Firebase browser app configuration                                                   |
+| `FIREBASE_SERVICE_ACCOUNT_JSON`            | Optional server credential JSON; takes precedence over individual fields             |
+| `FIREBASE_ADMIN_PROJECT_ID`                | Firebase Admin project ID when JSON is not supplied                                  |
+| `FIREBASE_ADMIN_CLIENT_EMAIL`              | Firebase Admin service-account email                                                 |
+| `FIREBASE_ADMIN_PRIVATE_KEY`               | Firebase Admin private key; literal `\\n` is converted to newlines                   |
+| `OPENROUTER_API_KEY`                       | Server-side provider credential; required for generation                             |
+| `OPENROUTER_MODEL`                         | Model ID; defaults to `meta-llama/llama-3.3-70b-instruct`                            |
+| `DATABASE_URL`                             | PostgreSQL connection string; required for persistence                               |
+| `REDIS_URL`                                | Redis connection string; missing/unavailable Redis triggers fail-open quota behavior |
+| `CHAT_MAX_MESSAGE_CHARS`                   | Default 8,000; valid range 1–32,000                                                  |
+| `CHAT_HISTORY_MAX_MESSAGES`                | Default 20; valid range 1–500                                                        |
+| `CHAT_HISTORY_MAX_CHARS`                   | Default 24,000; valid range 1–1,000,000 and must be at least message max chars       |
+| `CHAT_MAX_OUTPUT_TOKENS`                   | Default 1,024; valid range 1–8,192                                                   |
+| `CHAT_RATE_LIMIT_MAX_REQUESTS`             | Default 10; valid range 1–10,000                                                     |
+| `CHAT_RATE_LIMIT_WINDOW_SECONDS`           | Default 60; valid range 1–86,400                                                     |
+| `LOG_LEVEL`                                | Pino level: trace/debug/info/warn/error/fatal/silent; default info                   |
 
-The browser redirects signed-out users away from `/chat`, but `/api/chat` has no Firebase token verification. Anyone able to reach the endpoint can call it directly without going through the login screen. The browser request does not attach a Firebase ID token, and the server does not establish a verified user identity.
+Invalid numeric chat configuration returns a safe 503. `DATABASE_URL` is required lazily when the database is first used; `OPENROUTER_API_KEY` is checked when a completion is requested. The app can serve public pages without Firebase browser configuration, but authentication and protected workflows will not be usable.
 
-| Gap | Practical effect |
-|---|---|
-| No request schema validation | Malformed bodies and invalid message structures are not handled deliberately |
-| No message-role restrictions | Callers control the roles and content forwarded after the server prompt |
-| No application rate limiting | The app has no per-user request or usage controls |
-| No history or output limits | There is no explicit application-level context or generation budget |
-| No outer error handler | JSON parsing and initial provider failures lack a controlled error response |
-| No cancellation propagation | Client disconnects are not explicitly connected to upstream cancellation |
+## 11. Build, deployment, and operations
 
-There is also a stream lifecycle issue: the catch block calls `controller.error(err)`, and the `finally` block then calls `controller.close()`. Closing an already errored stream can raise another error.
+### Local development
 
-These are production-readiness concerns visible in the source. Their runtime behavior has not been tested as part of this review.
+The main commands are `npm ci`, `npm run dev`, `npm run lint`, `npm run build`, and `npm start`. Local integration settings and setup are covered in [docs/phase-1.md](docs/phase-1.md), [docs/phase-2.md](docs/phase-2.md), [docs/phase-3.md](docs/phase-3.md), and [docs/phase-4.md](docs/phase-4.md). The migration command is `npm run db:migrate`; it reads `.env.local` through Node's `--env-file` option. A production start requires a successful build.
 
-## 8. Frontend structure and styling
+### Container deployment
 
-Material UI supplies nearly all visual structure through `Box`, `Stack`, `Typography`, `TextField`, `AppBar`, `Drawer`, and menu components. Styling is mostly inline through `sx`, with a small global CSS reset in [public/globals.css](public/globals.css).
+[Dockerfile](Dockerfile) uses a Node 22 build stage, `npm ci`, one Next build worker, and Next standalone output. The runtime image is Node 22 Debian slim, runs as the non-root `node` user, includes static assets and migration dependencies, and defines a health check against `/api/health`. Public Firebase web variables are Docker build arguments; secrets are supplied only at runtime. The image carries an OCI source revision label.
 
-The [root layout](app/layout.js) is marked `"use client"` and wraps the app in `AuthProvider`. This makes the shared layout part of the client component tree; the API route remains server-side. A separate client-side provider component would allow the root layout to remain a server component.
+`docker-compose.demo.yml` is a limited HTTP demo stack with app, PostgreSQL 16, Redis 7, and Nginx. It intentionally omits Firebase/OpenRouter credentials. `docker-compose.prod.yml` adds Nginx on ports 80/443, persists PostgreSQL in a named external volume, keeps Redis ephemeral, binds the app to localhost:3000, sets small-host memory limits, and expects a runtime env file. `docker-compose.test.yml` provides disposable PostgreSQL/Redis test services. `docker-compose.cloudwatch.yml` is an optional logging-driver override requiring AWS setup.
 
-Other implementation details:
+The production path and operational cautions are described in [docs/deploy-ec2.md](docs/deploy-ec2.md); the temporary demo instructions and recorded smoke-check evidence are in [docs/deploy-demo.md](docs/deploy-demo.md). Production configuration separates Compose interpolation (`.env.production`) from raw Docker runtime settings (`runtime.env`). PostgreSQL data should be backed up before risky migrations; Redis state is disposable.
 
-- Inter is configured through `next/font/google`.
-- Metadata configuration is commented out.
-- Navigation changes according to authentication state.
-- Assistant messages align left and user messages align right, with different bubble colors.
-- The authentication form uses fixed dimensions, which may constrain mobile layouts.
-- The authentication container's width contains a `100wh` typo.
-- The authentication form is not an HTML `<form>`, so it lacks native form-submit behavior.
-- Login errors are rendered both inside the form and again by the login page.
-- Authentication buttons display progress text, but do not use the `disabled` attribute to communicate or enforce the pending state at the button level. The login and registration handlers do have state-based guards.
+Nginx templates support HTTP bootstrap and HTTPS/Certbot. The production Nginx config disables buffering, caching, and gzip for `/api/chat`, with a 150-second read timeout. The base Nginx config sets `client_max_body_size 128k`, lower than the app's 1 MiB JSON parser cap. Current per-message defaults fit within that proxy ceiling, but the two limits are not equivalent; a future larger request may be rejected by Nginx before reaching the app.
 
-## 9. Configuration and deployment
+### CI and deploy automation
 
-The repository provides these commands:
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs checks on pull requests only. Its check job provisions PostgreSQL 16 and Redis 7 services, runs `npm ci`, lint, migration, all Vitest projects, production build, and deployment-shell syntax validation. Direct pushes to `main` trigger no workflow, so they neither consume GitHub Actions runner time nor deploy to EC2. The workflow no longer contains an automated deployment job.
 
-```bash
-npm ci
-npm run dev
-npm run lint
-npm run build
-npm start
-```
+Manual deployment tooling remains in the repository. [scripts/deploy-ec2.sh](scripts/deploy-ec2.sh) validates a revision/checksum, loads the image, applies migrations before replacing the running app, waits for the new app, validates/reloads Nginx, checks health, and records the deployed/previous image. On failure after replacement it attempts to restore the previous image. [scripts/compose-prod.sh](scripts/compose-prod.sh) selects the deployed image and optionally adds CloudWatch logging config. This is a single-host replacement and can incur downtime; rollback restores application code but does not reverse database migrations. These scripts require an operator to run them and are not invoked by pushes to `main`.
 
-`npm ci` installs the locked dependencies. The scripts start the development server, run linting, build the application, and start the production server, respectively. A production start requires a successful build first.
+### Optional operations
 
-The AI integration requires a server environment variable:
+- [scripts/backup-db.sh](scripts/backup-db.sh) creates a compressed logical PostgreSQL dump and uploads it to an operator-specified S3 bucket using SSE-S3, then removes its temporary file.
+- [scripts/enable-https.sh](scripts/enable-https.sh) obtains a Let's Encrypt HTTP-01 certificate and swaps the active Nginx template, restoring the previous template if verification fails.
+- [scripts/renew-cert.sh](scripts/renew-cert.sh) renews certificates and validates/reloads Nginx; systemd service/timer units are under `deploy/`.
+- [scripts/health-metric.sh](scripts/health-metric.sh) probes the local HTTPS endpoint and publishes a CloudWatch health metric.
+- CloudWatch log/metric/alarm setup and EC2 IAM permissions are documented, but AWS resources are not created by merely checking out the repository.
 
-```env
-OPENROUTER_API_KEY=...
-```
+## 12. Tests and verification
 
-Firebase client configuration is hardcoded in `app/lib/firebase.js`. There is a commented environment-variable alternative, but it is inactive. No environment example file is included.
+Vitest projects are configured in [vitest.config.mjs](vitest.config.mjs):
 
-The project uses the `@/*` import alias, mapped to the repository root in [jsconfig.json](jsconfig.json).
+| Command              | Coverage / dependencies                                                                                        |
+| -------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `npm test`           | Unit, mocked route, client, Markdown, logging, health, and deployment control-flow tests; no external services |
+| `npm run test:db`    | PostgreSQL persistence and exported API integration tests; requires migrated disposable test DB                |
+| `npm run test:redis` | Redis limiter integration tests; requires disposable Redis and explicit test URL                               |
+| `npm run test:all`   | All Vitest projects; requires configured test services                                                         |
 
-Deployment configuration is sparse:
+Coverage areas include schema/config validation, Firebase Admin token verification with mocks, auth-before-provider behavior, streaming and cancellation, history truncation, SQL ownership and ordering, turn/abort/retry persistence, advisory-lock concurrency, cascade deletion, Redis atomicity/isolation/expiry/TTL repair, Markdown XSS-sensitive behavior, request logging/redaction, health checks, and deployment rollback control flow. The API integration tests exercise exported Next route functions with real PostgreSQL/Redis while mocking Firebase and OpenRouter. They are not full browser or external-service end-to-end tests.
 
-- [next.config.mjs](next.config.mjs) contains an empty configuration object.
-- [README.md](README.md) is the default Next.js starter documentation.
-- [awsSync.txt](awsSync.txt) contains a manual `rsync` command targeting an AWS EC2 host, suggesting an intended EC2 deployment. It does not establish that a deployment is currently running.
-- No Dockerfile, CI workflow, process-manager configuration, or reverse-proxy setup is included.
-- There are no repository tests or test scripts.
+The PR workflow is configured to run lint, migrations, all tests, build, and shell syntax checks. For this report update, `npm test` passed (87 tests across 10 files) and `npm run lint` passed with no warnings or errors. The PostgreSQL/Redis integration projects were not run in this pass. These results do not establish that external Firebase/OpenRouter or AWS integrations are available. `docs/deploy-demo.md` records a manual EC2 demo smoke check on 2026-10-23: public pages/assets and `/api/health` returned 200, health showed PostgreSQL/Redis true, and unauthenticated chat/conversation API calls returned 401. That record is a point-in-time smoke check, not load testing, browser automation, or validation of live model/auth flows.
 
-## 10. Overall assessment
+## 13. Known limitations and operational risks
 
-The strongest parts of the project are its small, understandable structure and complete browser-to-model streaming path. It demonstrates Firebase email/password authentication, shared React authentication state, App Router navigation, server-side model integration, and incremental rendering of generated text.
+- **Legal reliability:** The model response is not retrieved from or checked against current law or official sources. No citations or legal review are enforced.
+- **Quota availability tradeoff:** Redis outage fails open, temporarily removing the application's request quota. Provider-side account limits remain separate.
+- **Single-host deployment:** The documented EC2 topology has a single app/database host and downtime during replacement. It has no database HA or zero-downtime rollout.
+- **Session locks:** Conversation generation uses session-level PostgreSQL advisory locks and holds one pooled connection during the provider stream. Transaction-pooling middleware is incompatible.
+- **Crash consistency:** Assistant content is committed at completion/interruption, not token by token. A hard process crash may lose generated text and leave an incomplete placeholder.
+- **Data lifecycle:** Conversation/message retention and account deletion UX are not implemented. Conversation and transcript APIs are not paginated.
+- **Health scope:** Health checks PostgreSQL and Redis, not Firebase, OpenRouter, TLS validity from an independent location, or user-facing correctness.
+- **Request-size layers:** Nginx's 128 KiB request limit is stricter than the app's 1 MiB body parser limit.
+- **Deployment rollback:** App rollback does not undo schema changes; migrations must be planned to remain compatible with the previous release.
+- **External verification:** Real Firebase/OpenRouter calls, a full production EC2 deployment, HTTPS renewal, S3 restore, CloudWatch delivery/alarms, and production load behavior require separate live verification.
 
-The main unfinished areas are server-side identity verification, reliable authentication initialization, request validation, stream error handling, and persistent conversation storage. The broken registration error handler and overlapping-stream behavior are concrete implementation defects that can disrupt ordinary usage.
+## Overall assessment
 
-The code is best understood as a focused prototype of an authenticated consumer-rights chat application. Its UI login requirement currently does not provide server-side access control for model requests, and its answers are generated from a fixed prompt without a verified legal knowledge source.
+Compared with the initial prototype described in the previous report, the current checkout implements server-side identity verification, strict chat contracts, durable conversation ownership and transcripts, atomic Redis quotas, stream lifecycle management, structured logs, health checks, and a test/deployment path. It is a substantially more complete application and operational baseline. It should still be regarded as a small single-host service rather than a high-availability or legally authoritative product, and optional cloud workflows should be considered configured only after they have been exercised in the target accounts and environment.

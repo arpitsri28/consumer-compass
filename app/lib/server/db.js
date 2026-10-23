@@ -1,6 +1,7 @@
 import "server-only";
 import pg from "pg";
 import { HttpError } from "./errors.js";
+import { logEvent } from "./logger.js";
 
 export function getPool() {
   if (!process.env.DATABASE_URL) {
@@ -15,7 +16,7 @@ export function getPool() {
       statement_timeout: 10000,
       application_name: "consumer-compass",
     });
-    pool.on("error", () => console.error("An idle database connection failed."));
+    pool.on("error", () => logEvent("error", "database_idle_connection_failed"));
     globalThis.consumerCompassPool = pool;
   }
   return globalThis.consumerCompassPool;

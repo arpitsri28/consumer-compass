@@ -4,6 +4,7 @@ import { errorResponse, HttpError } from "./errors.js";
 import { upstreamError } from "./openrouter.js";
 import { systemPrompt } from "./system-prompt.js";
 import { checkRateLimit as defaultRateLimit } from "./rate-limit.js";
+import { logEvent } from "./logger.js";
 
 function responseStream(completion, abortController, turn, cleanup) {
   const encoder = new TextEncoder();
@@ -27,7 +28,7 @@ function responseStream(completion, abortController, turn, cleanup) {
           else streamController.close();
         }
       } catch {
-        console.error("Assistant reply could not be persisted.");
+        logEvent("error", "assistant_persistence_failed");
         if (!cancelled) streamController.error(interrupted());
       } finally { cleanup(); }
     })();
@@ -117,7 +118,7 @@ export function createChatHandler({ verifyRequestUser, createCompletion, store, 
       abortController.abort();
       if (turn) {
         try { await turn.finish("", true); }
-        catch { console.error("Failed request could not be finalized in the database."); }
+        catch { logEvent("error", "failed_turn_finalization_failed"); }
       }
       return errorResponse(request.signal.aborted
         ? new HttpError(499, "REQUEST_ABORTED", "Request was cancelled.") : error);

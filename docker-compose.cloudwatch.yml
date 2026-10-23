@@ -1,0 +1,25 @@
+# Optional: requires the IAM role and log group documented in docs/deploy-ec2.md.
+# !override prevents json-file options from being merged into awslogs options.
+x-cloudwatch: &cloudwatch
+  driver: awslogs
+  options:
+    awslogs-region: ${AWS_REGION:?Set AWS_REGION}
+    awslogs-group: ${CW_LOG_GROUP:?Create CW_LOG_GROUP first}
+    awslogs-create-group: "false"
+    tag: "{{.Name}}"
+    mode: non-blocking
+    max-buffer-size: "1m"
+
+services:
+  app:
+    logging: !override
+      <<: *cloudwatch
+  nginx:
+    logging: !override
+      <<: *cloudwatch
+  postgres:
+    logging: !override
+      <<: *cloudwatch
+  redis:
+    logging: !override
+      <<: *cloudwatch

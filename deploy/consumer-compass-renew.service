@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew Consumer Compass TLS certificate and reload Nginx
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/consumer-compass/scripts/renew-cert.sh

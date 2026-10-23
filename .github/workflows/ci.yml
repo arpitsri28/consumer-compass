@@ -1,9 +1,7 @@
-name: Test, build, and deploy
+name: Pull request checks
 
 on:
   pull_request:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
@@ -56,71 +54,3 @@ jobs:
       - run: npm run build
       - name: Validate deployment shell syntax
         run: bash -n scripts/deploy-ec2.sh
-
-  deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: check
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    environment: production
-    env:
-      EC2_HOST: ${{ secrets.EC2_HOST }}
-      EC2_USER: ${{ secrets.EC2_USER }}
-      EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-      EC2_SSH_KNOWN_HOSTS: ${{ secrets.EC2_SSH_KNOWN_HOSTS }}
-      EC2_SSH_PORT: ${{ vars.EC2_SSH_PORT || '22' }}
-      NEXT_PUBLIC_FIREBASE_API_KEY: ${{ vars.NEXT_PUBLIC_FIREBASE_API_KEY }}
-      NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${{ vars.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN }}
-      NEXT_PUBLIC_FIREBASE_PROJECT_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_PROJECT_ID }}
-      NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: ${{ vars.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET }}
-      NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID }}
-      NEXT_PUBLIC_FIREBASE_APP_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_APP_ID }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - name: Check deployment configuration
-        shell: bash
-        run: |
-          set -euo pipefail
-          for name in EC2_HOST EC2_USER EC2_SSH_PRIVATE_KEY EC2_SSH_KNOWN_HOSTS \
-            NEXT_PUBLIC_FIREBASE_API_KEY NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN NEXT_PUBLIC_FIREBASE_PROJECT_ID \
-            NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID NEXT_PUBLIC_FIREBASE_APP_ID; do
-            if [[ -z "${!name}" ]]; then echo "Missing deployment setting: $name" >&2; exit 1; fi
-          done
-          [[ "$EC2_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]]
-          [[ "$EC2_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
-          [[ "$EC2_SSH_PORT" =~ ^[0-9]+$ ]] && (( EC2_SSH_PORT > 0 && EC2_SSH_PORT < 65536 ))
-      - name: Build the tested revision for x86-64 EC2
-        run: |
-          docker build --platform linux/amd64 --tag "consumer-compass:$GITHUB_SHA" \
-            --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
-            --build-arg NEXT_PUBLIC_FIREBASE_API_KEY \
-            --build-arg NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN \
-            --build-arg NEXT_PUBLIC_FIREBASE_PROJECT_ID \
-            --build-arg NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET \
-            --build-arg NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID \
-            --build-arg NEXT_PUBLIC_FIREBASE_APP_ID .
-      - name: Prepare SSH and image bundle
-        run: |
-          set -euo pipefail
-          install -m 700 -d "$HOME/.ssh"
-          printf '%s\n' "$EC2_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
-          printf '%s\n' "$EC2_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
-          mkdir -p "$RUNNER_TEMP/consumer-compass-release"
-          docker save "consumer-compass:$GITHUB_SHA" | gzip > "$RUNNER_TEMP/consumer-compass-release/image.tar.gz"
-          cp scripts/deploy-ec2.sh "$RUNNER_TEMP/consumer-compass-release/"
-          (cd "$RUNNER_TEMP/consumer-compass-release" && sha256sum image.tar.gz > image.sha256)
-      - name: Transfer and deploy over SSH
-        run: |
-          set -euo pipefail
-          target="$EC2_USER@$EC2_HOST"
-          ssh_options=(-i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15)
-          ssh "${ssh_options[@]}" -p "$EC2_SSH_PORT" "$target" "mkdir -p /tmp/consumer-compass-$GITHUB_SHA"
-          scp "${ssh_options[@]}" -P "$EC2_SSH_PORT" "$RUNNER_TEMP/consumer-compass-release/"* "$target:/tmp/consumer-compass-$GITHUB_SHA/"
-          ssh "${ssh_options[@]}" -p "$EC2_SSH_PORT" "$target" \
-            "bash /tmp/consumer-compass-$GITHUB_SHA/deploy-ec2.sh $GITHUB_SHA && rm -rf /tmp/consumer-compass-$GITHUB_SHA"
-      - name: Remove SSH credentials from the runner
-        if: always()
-        run: rm -f "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
