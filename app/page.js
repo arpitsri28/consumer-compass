@@ -1,13 +1,12 @@
 "use client"
-import React, { useState } from "react"
+import React from "react"
 import Navbar from "./components/Navbar"
-import { AuthProvider } from "./context/authContext"
 import Box from "@mui/material/Box"; 
 import Typography from "@mui/material/Typography";
 
 export default function Home() {
     return (
-        <AuthProvider>
+        <>
         <Navbar page={"Home"}/>
         <Box
             sx={{
@@ -36,6 +35,6 @@ export default function Home() {
                 Get started by signing up (or logging in if you have an existing account) from the menu.
             </Typography>
         </Box>
-        </AuthProvider>
+        </>
     )   
 };

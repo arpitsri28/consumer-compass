@@ -1,9 +1,10 @@
 export class HttpError extends Error {
-  constructor(status, code, message, details) {
+  constructor(status, code, message, details, headers = {}) {
     super(message);
     this.status = status;
     this.code = code;
     this.details = details;
+    this.headers = headers;
   }
 }
 
@@ -17,6 +18,6 @@ export function errorResponse(error) {
         ...(known && error.details ? { details: error.details } : {}),
       },
     },
-    { status: known ? error.status : 500, headers: { "Cache-Control": "no-store" } },
+    { status: known ? error.status : 500, headers: { "Cache-Control": "no-store", ...(known ? error.headers : {}) } },
   );
 }

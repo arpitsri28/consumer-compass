@@ -18,7 +18,7 @@ const other = { uid: `phase2-${randomUUID()}`, email: 'other@example.com' };
 const request = (body, signal) => new Request('http://localhost/api/chat', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal,
 });
-const makeHandler = (createCompletion, user = owner) => createChatHandler({
+const makeHandler = (createCompletion, user = owner) => createChatHandler({ checkRateLimit: async () => ({ allowed: true }),
   verifyRequestUser: async () => user, store, getConfig: () => getChatConfig({}), createCompletion,
 });
 const answer = async () => (async function* () { yield { choices: [{ delta: { content: 'A saved reply.' } }] }; })();
@@ -112,6 +112,29 @@ test('PostgreSQL persistence and API integration', async (t) => {
       assert.equal(messages.at(-2).content, 'Failure question');
       assert.equal(messages.at(-1).content, '');
       assert.equal(messages.at(-1).incomplete, true);
+    });
+    await t.test('retry replaces the latest incomplete assistant without duplicating messages', async () => {
+      const before = await store.get(owner.uid, first.id);
+      const assistantId = before.messages.at(-1).id;
+      const response = await makeHandler(answer)(request({ conversationId: first.id, retryMessageId: assistantId }));
+      assert.equal(await response.text(), 'A saved reply.');
+      const after = await store.get(owner.uid, first.id);
+      assert.equal(after.messages.length, before.messages.length);
+      assert.equal(after.messages.at(-1).id, assistantId);
+      assert.equal(after.messages.at(-1).incomplete, false);
+      assert.equal(after.messages.at(-2).content, 'Failure question');
+      const completedRetry = await makeHandler(() => assert.fail('must not regenerate'))(request({ conversationId: first.id, retryMessageId: assistantId }));
+      assert.equal(completedRetry.status, 409);
+    });
+    await t.test('retry cannot target another conversation, an older reply, or another user', async () => {
+      const turn = await store.beginTurn(owner.uid, first.id, 'Old interrupted question', 20);
+      await turn.finish('old partial', true);
+      const oldId = (await store.get(owner.uid, first.id)).messages.at(-1).id;
+      await assert.rejects(store.beginTurn(owner.uid, second.id, undefined, 20, oldId), status(409));
+      await assert.rejects(store.beginTurn(other.uid, first.id, undefined, 20, oldId), status(404));
+      const newer = await store.beginTurn(owner.uid, first.id, 'Newer question', 20);
+      await newer.finish('new answer', false);
+      await assert.rejects(store.beginTurn(owner.uid, first.id, undefined, 20, oldId), status(409));
     });
     await t.test('SQL failures roll back and release generation locks', async () => {
       const before = await store.get(owner.uid, first.id);

@@ -3,6 +3,7 @@ import { readJsonBody, truncateHistory, validateChatRequest } from "./chat-valid
 import { errorResponse, HttpError } from "./errors.js";
 import { upstreamError } from "./openrouter.js";
 import { systemPrompt } from "./system-prompt.js";
+import { checkRateLimit as defaultRateLimit } from "./rate-limit.js";
 
 function responseStream(completion, abortController, turn, cleanup) {
   const encoder = new TextEncoder();
@@ -64,7 +65,7 @@ function responseStream(completion, abortController, turn, cleanup) {
   });
 }
 
-export function createChatHandler({ verifyRequestUser, createCompletion, store, getConfig = getChatConfig }) {
+export function createChatHandler({ verifyRequestUser, createCompletion, store, getConfig = getChatConfig, checkRateLimit = defaultRateLimit }) {
   return async function POST(request) {
     const abortController = new AbortController();
     const abort = () => abortController.abort();
@@ -81,11 +82,16 @@ export function createChatHandler({ verifyRequestUser, createCompletion, store, 
 
     try {
       const user = await verifyRequestUser(request);
-      await store.upsertUser(user);
       const config = getConfig();
-      const { conversationId, message } = validateChatRequest(await readJsonBody(request), config);
+      const limit = await checkRateLimit(user.uid, config);
+      if (!limit.allowed) {
+        throw new HttpError(429, "RATE_LIMITED", "Too many chat requests. Please wait before trying again.",
+          undefined, { "Retry-After": String(limit.retryAfter) });
+      }
+      await store.upsertUser(user);
+      const { conversationId, message, retryMessageId } = validateChatRequest(await readJsonBody(request), config);
       if (abortController.signal.aborted) throw new HttpError(499, "REQUEST_ABORTED", "Request was cancelled.");
-      turn = await store.beginTurn(user.uid, conversationId, message, config.CHAT_HISTORY_MAX_MESSAGES);
+      turn = await store.beginTurn(user.uid, conversationId, message, config.CHAT_HISTORY_MAX_MESSAGES, retryMessageId);
       if (abortController.signal.aborted) throw new HttpError(499, "REQUEST_ABORTED", "Request was cancelled.");
 
       let completion;

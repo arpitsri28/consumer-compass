@@ -10,6 +10,8 @@ const configSchema = z.object({
   CHAT_HISTORY_MAX_MESSAGES: positiveInteger(20, 500),
   CHAT_HISTORY_MAX_CHARS: positiveInteger(24000, 1000000),
   CHAT_MAX_OUTPUT_TOKENS: positiveInteger(1024, 8192),
+  CHAT_RATE_LIMIT_MAX_REQUESTS: positiveInteger(10, 10000),
+  CHAT_RATE_LIMIT_WINDOW_SECONDS: positiveInteger(60, 86400),
 }).refine(
   (config) => config.CHAT_HISTORY_MAX_CHARS >= config.CHAT_MAX_MESSAGE_CHARS,
   { message: "CHAT_HISTORY_MAX_CHARS must be at least CHAT_MAX_MESSAGE_CHARS" },

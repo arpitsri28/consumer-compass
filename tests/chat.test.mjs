@@ -18,7 +18,7 @@ const request = (body = chatBody, options = {}) => new Request('http://localhost
   ...options,
 });
 const authenticated = async () => ({ uid: 'test-user', email: 'test@example.com' });
-const handler = (overrides = {}) => createChatHandler({
+const handler = (overrides = {}) => createChatHandler({ checkRateLimit: async () => ({ allowed: true }),
   verifyRequestUser: authenticated,
   getConfig: () => config,
   store: {
@@ -50,6 +50,9 @@ for (const [name, body] of [
   ['oversized content', { ...chatBody, message: 'x'.repeat(8001) }],
   ['invalid id', { ...chatBody, conversationId: 'invalid' }],
   ['extra history', { ...chatBody, messages: [userMessage] }],
+  ['ambiguous retry', { ...chatBody, retryMessageId: '1' }],
+  ['invalid retry id', { conversationId, retryMessageId: 'abc' }],
+  ['overflowing retry id', { conversationId, retryMessageId: '9223372036854775808' }],
 ]) {
   test(`validation rejects ${name}`, () => {
     assert.throws(() => validateChatRequest(body, config), hasStatus(400));

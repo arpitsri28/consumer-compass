@@ -53,7 +53,7 @@ test('conversation handlers reject invalid IDs, blank titles and extra rename fi
 });
 
 test('chat returns 404 for unowned conversations without calling the model', async () => {
-  const POST = createChatHandler({ verifyRequestUser: async () => user, getConfig: () => getChatConfig({}),
+  const POST = createChatHandler({ checkRateLimit: async () => ({ allowed: true }), verifyRequestUser: async () => user, getConfig: () => getChatConfig({}),
     store: { upsertUser: async () => {}, beginTurn: async () => { throw new HttpError(404, 'NOT_FOUND', 'Conversation not found.'); } },
     createCompletion: async () => assert.fail('must not call model'),
   });
@@ -63,7 +63,7 @@ test('chat returns 404 for unowned conversations without calling the model', asy
 
 test('chat finalizes a reply as complete before closing its response', async () => {
   const saved = [];
-  const POST = createChatHandler({ verifyRequestUser: async () => user, getConfig: () => getChatConfig({}),
+  const POST = createChatHandler({ checkRateLimit: async () => ({ allowed: true }), verifyRequestUser: async () => user, getConfig: () => getChatConfig({}),
     store: { upsertUser: async () => {}, beginTurn: async (uid, value, content, limit) => {
       assert.equal(uid, user.uid); assert.equal(value, id); assert.equal(content, 'hello'); assert.equal(limit, 20);
       return { messages: [{ role: 'user', content }], finish: async (...args) => saved.push(args) };
@@ -79,7 +79,7 @@ test('chat finalizes a reply as complete before closing its response', async () 
 
 test('provider rejection leaves an incomplete assistant placeholder', async () => {
   const saved = [];
-  const POST = createChatHandler({ verifyRequestUser: async () => user, getConfig: () => getChatConfig({}),
+  const POST = createChatHandler({ checkRateLimit: async () => ({ allowed: true }), verifyRequestUser: async () => user, getConfig: () => getChatConfig({}),
     store: { upsertUser: async () => {}, beginTurn: async () => ({ messages: [], finish: async (...args) => saved.push(args) }) },
     createCompletion: async () => { throw { status: 503 }; },
   });

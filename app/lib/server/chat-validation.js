@@ -13,10 +13,14 @@ function parse(schema, body) {
 }
 
 export function validateChatRequest(body, config) {
+  const conversationId = z.string().uuid();
   return parse(z.object({
-    conversationId: z.string().uuid(),
-    message: z.string().trim().min(1).max(config.CHAT_MAX_MESSAGE_CHARS),
-  }).strict(), body);
+    conversationId,
+    message: z.string().trim().min(1).max(config.CHAT_MAX_MESSAGE_CHARS).optional(),
+    retryMessageId: z.string().refine((value) => /^[1-9]\d{0,18}$/.test(value) &&
+      BigInt(value) <= 9223372036854775807n, { message: "Invalid assistant message ID." }).optional(),
+  }).strict().refine((value) => (value.message === undefined) !== (value.retryMessageId === undefined),
+    { message: "Provide exactly one of message or retryMessageId." }), body);
 }
 
 export function validateConversationId(id) {

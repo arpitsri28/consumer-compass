@@ -7,9 +7,12 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "node --conditions=react-server --experimental-default-type=module --test tests/*.test.mjs",
+    "test": "npm run test:server && npm run test:client",
     "db:migrate": "node --conditions=react-server --experimental-default-type=module --env-file=.env.local scripts/migrate.mjs",
-    "test:db": "node --conditions=react-server --experimental-default-type=module --env-file=.env.local --test tests/*.integration.mjs"
+    "test:db": "node --conditions=react-server --experimental-default-type=module --env-file=.env.local --test tests/*.integration.mjs",
+    "test:server": "node --conditions=react-server --experimental-default-type=module --test tests/*.test.mjs",
+    "test:client": "node --experimental-default-type=module --test tests/client/*.test.mjs",
+    "test:redis": "node --conditions=react-server --experimental-default-type=module --env-file=.env.local --test tests/redis/*.integration.mjs"
   },
   "dependencies": {
     "@emotion/react": "^11.13.0",
@@ -18,11 +21,13 @@
     "@mui/material": "^5.16.6",
     "firebase": "^10.12.5",
     "firebase-admin": "^13.10.0",
+    "ioredis": "^6.0.0",
     "next": "^14.2.5",
     "openai": "^4.54.0",
     "pg": "^8.23.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
     "react-router-dom": "^6.26.0",
     "server-only": "^0.0.1",
     "zod": "^4.6.7"

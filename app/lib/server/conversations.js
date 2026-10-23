@@ -85,21 +85,33 @@ export function createConversationStore(poolFactory = getPool) {
       } catch (error) { throw databaseError(error); }
       finally { await release(); }
     },
-    async beginTurn(uid, id, content, historyLimit) {
+    async beginTurn(uid, id, content, historyLimit, retryMessageId) {
       const { client, release } = await lockConversation(uid, id);
       let assistantId;
       let messages;
       try {
         await client.query("BEGIN");
-        await client.query(`UPDATE conversations SET
-          title = CASE WHEN title = 'New conversation' AND NOT EXISTS
-            (SELECT 1 FROM messages WHERE conversation_id = $1) THEN $3 ELSE title END,
-          updated_at = clock_timestamp() WHERE id = $1 AND user_id = $2`, [id, uid, conversationTitle(content)]);
-        await client.query(`INSERT INTO messages (conversation_id, role, content)
-          SELECT id, 'user', $3 FROM conversations WHERE id = $1 AND user_id = $2`, [id, uid, content]);
-        const assistant = await client.query(`INSERT INTO messages (conversation_id, role, content, incomplete)
-          SELECT id, 'assistant', '', true FROM conversations WHERE id = $1 AND user_id = $2 RETURNING id`, [id, uid]);
-        assistantId = assistant.rows[0].id;
+        if (retryMessageId) {
+          const retry = await client.query(`UPDATE messages m SET content = '', incomplete = true
+            WHERE m.id = $3 AND m.conversation_id = $1 AND m.role = 'assistant' AND m.incomplete
+            AND EXISTS (SELECT 1 FROM conversations WHERE id = $1 AND user_id = $2)
+            AND NOT EXISTS (SELECT 1 FROM messages newer WHERE newer.conversation_id = $1 AND newer.id > m.id)
+            RETURNING m.id`, [id, uid, retryMessageId]);
+          if (!retry.rowCount) {
+            throw new HttpError(409, "RETRY_CONFLICT", "Only the latest incomplete reply can be retried. Reload the conversation.");
+          }
+          assistantId = retry.rows[0].id;
+        } else {
+          await client.query(`UPDATE conversations SET
+            title = CASE WHEN title = 'New conversation' AND NOT EXISTS
+              (SELECT 1 FROM messages WHERE conversation_id = $1) THEN $3 ELSE title END,
+            updated_at = clock_timestamp() WHERE id = $1 AND user_id = $2`, [id, uid, conversationTitle(content)]);
+          await client.query(`INSERT INTO messages (conversation_id, role, content)
+            SELECT id, 'user', $3 FROM conversations WHERE id = $1 AND user_id = $2`, [id, uid, content]);
+          const assistant = await client.query(`INSERT INTO messages (conversation_id, role, content, incomplete)
+            SELECT id, 'assistant', '', true FROM conversations WHERE id = $1 AND user_id = $2 RETURNING id`, [id, uid]);
+          assistantId = assistant.rows[0].id;
+        }
         const history = await client.query(`SELECT m.role, m.content FROM messages m
           JOIN conversations c ON c.id = m.conversation_id
           WHERE c.id = $1 AND c.user_id = $2 AND NOT m.incomplete
