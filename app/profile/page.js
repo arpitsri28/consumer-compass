@@ -1,5 +1,5 @@
 'use client'
-import React from "react";
+import React, { useEffect } from "react";
 import { useAuth } from "@/app/context/authContext";
 import { useRouter } from 'next/navigation';
 import Navbar from "@/app/components/Navbar";
@@ -8,8 +8,10 @@ import Box from '@mui/material/Box';
 export default function Profile() {
     const { currentUser, userLoggedIn } = useAuth();
     const router = useRouter();
+    useEffect(() => {
+        if (!userLoggedIn) router.replace('/auth/login');
+    }, [userLoggedIn, router]);
     if (!userLoggedIn) {
-        router.replace('/auth/login');
         return null;
     }
     return (

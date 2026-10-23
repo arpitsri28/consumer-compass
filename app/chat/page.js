@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 import Navbar from "../components/Navbar";
 
 export default function Chat() {
-  const { userLoggedIn } = useAuth();
+  const { userLoggedIn, currentUser } = useAuth();
   const router = useRouter();
 
   
@@ -24,13 +24,21 @@ export default function Chat() {
     setMessages((prevMessages) => [...prevMessages, newMessage, {role: 'assistant', content: ''}]);
   
     try {
+      if (!currentUser) throw new Error('Please sign in before sending a message.');
+      const token = await currentUser.getIdToken();
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify([...messages, newMessage]),
       });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.error?.message || 'The chat request failed.');
+      }
   
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
